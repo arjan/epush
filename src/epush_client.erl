@@ -1,14 +1,39 @@
+%% @author Arjan Scherpenisse <arjan@scherpenisse.net>
+%% @copyright 2012 Arjan Scherpenisse <arjan@scherpenisse.net>
+%% Date: 2012-02-25
+
+%% @doc Erlang PUbSubHubbub: client
+
+%% Copyright 2012 Arjan Scherpenisse
+%%
+%% Licensed under the Apache License, Version 2.0 (the "License");
+%% you may not use this file except in compliance with the License.
+%% You may obtain a copy of the License at
+%% 
+%%     http://www.apache.org/licenses/LICENSE-2.0
+%% 
+%% Unless required by applicable law or agreed to in writing, software
+%% distributed under the License is distributed on an "AS IS" BASIS,
+%% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+%% See the License for the specific language governing permissions and
+%% limitations under the License.
+
 -module(epush_client).
+-include("../include/epush.hrl").
+
 -behaviour(gen_server).
 -define(SERVER, ?MODULE).
 
--record(state, {pending}).
+-record(state, {pending, table}).
 
 %% ------------------------------------------------------------------
 %% API Function Exports
 %% ------------------------------------------------------------------
 
--export([start_link/0, subscribe/3]).
+-export([start_link/0, 
+         subscribe/3,
+         lookup_subscription/1
+        ]).
 
 %% ------------------------------------------------------------------
 %% gen_server Function Exports
@@ -29,20 +54,39 @@ start_link() ->
 subscribe(URL, CallbackURL, PostData) ->
     gen_server:call(?SERVER, {subscribe, URL, CallbackURL, PostData}).
 
+lookup_subscription(Identifier) ->
+    gen_server:call(?SERVER, {lookup_subscription, Identifier}).
+
 
 %% ------------------------------------------------------------------
 %% gen_server Function Definitions
 %% ------------------------------------------------------------------
 
 init(_Args) ->
-    {ok, #state{pending=gb_trees:empty()}}.
+    {ok, Table} = dets:open_file(epush_subscriptions, [{auto_save, 10000}]),
+    {ok, #state{pending=gb_trees:empty(),
+               table=Table}}.
 
-handle_call({subscribe, URL, CallbackURL, PostData}, From, State=#state{pending=P}) ->
+
+handle_call({lookup_subscription, Identifier}, _From, State=#state{table=T}) ->
+    case dets:lookup(T, Identifier) of
+        [Subscription] -> 
+            {reply, {ok, Subscription}, State};
+        [] ->
+            {reply, {error, notfound}, State}
+    end;
+
+handle_call({subscribe, URL, CallbackURL, PostData}, From, State=#state{pending=P, table=T}) ->
     io:format("epush: Subscribing...: ~p~n", [URL]),
-    PostBody = encode_postdata([{callback_url, CallbackURL}|PostData]),
+    VerifyToken = base64:encode(term_to_binary(erlang:now())),
+    PostBody = encode_postdata([{callback_url, CallbackURL},
+                                {verify_token, binary_to_list(VerifyToken)}
+                                |PostData]),
+    dets:insert(T, {VerifyToken, #epush_subscription{}}),
     {ok,RequestId} = httpc:request(post,{URL,[], "application/x-www-form-urlencoded", PostBody},[],[{sync,false}]),
     Pendings = gb_trees:insert(RequestId,{From,subscribe},P),
     {reply, ok, State#state{pending=Pendings}}.
+
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
@@ -51,7 +95,8 @@ handle_cast(_Msg, State) ->
 handle_info({http,{RequestId,HttpResponse}},State = #state{pending=P}) ->
     case gb_trees:lookup(RequestId,P) of
         {value,{Client,subscribe}} -> 
-            JSON = mochijson2:decode(HttpResponse),
+            {{_, 200, _}, _Headers, Body} = HttpResponse,
+            JSON = mochijson2:decode(Body),
             io:format("~p~n", [JSON]),
             gen_server:reply(Client,{ok,JSON}),
             {noreply, State#state{pending=gb_trees:delete(RequestId,P)}};
