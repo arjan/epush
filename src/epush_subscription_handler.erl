@@ -24,19 +24,19 @@
 
 -export([init/3, handle/2, terminate/2]).
 
--record(state, {}).
+-record(state, {callback}).
 
-init({_Any, http}, Req, _Args) ->
-    {ok, Req, #state{}}.
+init({_Any, http}, Req, [{callback, C}]) ->
+    {ok, Req, #state{callback=C}}.
 
-handle(Req, State) ->
+handle(Req, State=#state{callback=C}) ->
 
     case cowboy_http_req:method(Req) of
         {'POST', Req2} ->
             %% Subscription items
-            io:format("POST request to subscription handler, fixme!~n"),
             {ok, Body, Req3} = cowboy_http_req:body(Req2),
-            io:format("~p~n", [Body]),
+            %% Perform the callback
+            C(Body),
             {ok, Req4} = cowboy_http_req:reply(200, [{'Content-Type', <<"text/plain">>}], "", Req3),
             {ok, Req4, State};
 
